@@ -1,0 +1,8 @@
+# Copyright (c) 2025 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Force True Uppercase Behavior (ignores CapsLock and Shift)
+
+compatible: "zmk,behavior-force-true-upper"
+
+include: one_param.yaml
