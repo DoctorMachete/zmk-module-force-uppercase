@@ -11,133 +11,71 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/behavior.h>
-#include <zmk/hid.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/hid_indicators.h>
+
 
 #define ZMK_LED_CAPSLOCK_BIT BIT(1)         // *** from https://github.com/darknao/zmk/blob/2fad527cc5abed5bb59b4d4a4b0ee511d0e514e9/app/src/rgb_underglow.c#L320 ***
 
 /* -----------------------------------------------------------------------
- * Shared helper
- *
- * Determines whether LSHIFT should be added around the keycode event,
- * and whether the physical shift (if held) must be suppressed.
- *
- * Parameters:
- *   keycode      - the letter keycode to send
- *   pressed      - true = key down, false = key up
- *   need_shift   - true  = we want to produce uppercase via LSHIFT
- *                  false = we want bare keycode (no added shift)
- *   shift_held   - true if the user is physically holding LSHIFT or RSHIFT
- *   timestamp    - event timestamp
- *
- * When need_shift == false AND shift_held == true, the physical shift is
- * masked for the duration of the keycode event so the host sees no shift,
- * giving us a clean bare keycode regardless of what the user is pressing.
- * The mask is lifted immediately after, leaving the shift state intact for
- * every other concurrent or subsequent behavior.
+ * Shared helper: press or release a key, with an optional LSHIFT modifier.
+ * shift_needed: true  → hold LSHIFT around the keycode event
+ *               false → send keycode bare
  * ----------------------------------------------------------------------- */
-static int send_key(uint32_t keycode, bool pressed, bool need_shift,
-                    bool shift_held, int64_t timestamp) {
+static int send_key(uint32_t keycode, bool pressed, bool shift_needed,
+                    int64_t timestamp) {
     int ret;
 
-    if (pressed) {
-        if (need_shift) {
-            /*
-             * We need uppercase. Add our own LSHIFT. If the user is already
-             * holding shift, zmk_hid_register_mods() simply increments its
-             * reference count — harmless and correct.
-             */
-            ret = raise_zmk_keycode_state_changed_from_encoded(LSHIFT, true,
-                                                               timestamp);
-            if (ret < 0) {
-                return ret;
-            }
-        } else if (shift_held) {
-            /*
-             * We need a bare keycode, but physical shift is held. Mask it
-             * out so the host report sees no shift during this keycode event.
-             * zmk_hid_masked_mods_set() does NOT touch reference counts;
-             * clearing it later fully restores the modifier state.
-             */
-            zmk_hid_masked_mods_set(MOD_LSFT | MOD_RSFT);
+    if (pressed && shift_needed) {
+        ret = raise_zmk_keycode_state_changed_from_encoded(LSHIFT, true, timestamp);
+        if (ret < 0) {
+            return ret;
         }
     }
 
-    ret = raise_zmk_keycode_state_changed_from_encoded(keycode, pressed,
-                                                       timestamp);
+    ret = raise_zmk_keycode_state_changed_from_encoded(keycode, pressed, timestamp);
     if (ret < 0) {
-        /* Clean up any state we may have set before returning */
-        if (pressed && need_shift) {
-            raise_zmk_keycode_state_changed_from_encoded(LSHIFT, false,
-                                                        timestamp);
-        } else if (pressed && shift_held) {
-            zmk_hid_masked_mods_clear(MOD_LSFT | MOD_RSFT);
-        }
         return ret;
     }
 
-    if (!pressed) {
-        if (need_shift) {
-            ret = raise_zmk_keycode_state_changed_from_encoded(LSHIFT, false,
-                                                               timestamp);
-        } else if (shift_held) {
-            /* Lift the mask — physical shift is restored to the report */
-            zmk_hid_masked_mods_clear(MOD_LSFT | MOD_RSFT);
-        }
+    if (!pressed && shift_needed) {
+        ret = raise_zmk_keycode_state_changed_from_encoded(LSHIFT, false, timestamp);
     }
 
     return ret;
 }
 
 /* -----------------------------------------------------------------------
- * Shared state reader
+ * FORCE-UPPER
+ * Goal: always send the uppercase form of the letter.
  *
- * Returns the two facts both behaviors need:
- *   *caps_active  - true if the host's CapsLock LED is on
- *   *shift_held   - true if LSHIFT or RSHIFT is physically held
- * ----------------------------------------------------------------------- */
-static void read_input_state(bool *caps_active, bool *shift_held) {
-    zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    *caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
-
-    zmk_mods_t mods = zmk_hid_get_explicit_mods();
-    *shift_held = (mods & (MOD_LSFT | MOD_RSFT)) != 0;
-}
-
-/* -----------------------------------------------------------------------
- * FORCE-UPPER  (fucase)
- *
- * Default: always produce uppercase.
- * With shift held: invert → always produce lowercase.
- *
- *   need_shift = !caps_active XOR shift_held
+ * CapsLock OFF → need Shift to capitalise    → shift_needed = true
+ * CapsLock ON  → host already capitalises    → shift_needed = false
  * ----------------------------------------------------------------------- */
 #define DT_DRV_COMPAT zmk_behavior_force_upper
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
-static int on_fucase_pressed(struct zmk_behavior_binding *binding,
-                             struct zmk_behavior_binding_event event) {
-    bool caps_active, shift_held;
-    read_input_state(&caps_active, &shift_held);
-    bool need_shift = (!caps_active) ^ shift_held;
-    return send_key(binding->param1, true, need_shift, shift_held,
-                    event.timestamp);
+static int on_force_upper_binding_pressed(struct zmk_behavior_binding *binding,
+                                          struct zmk_behavior_binding_event event) {
+    zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
+    /* Uppercase = bare key when caps ON, shifted key when caps OFF */
+    bool need_shift = !caps_active;
+    return send_key(binding->param1, true, need_shift, event.timestamp);
 }
 
-static int on_fucase_released(struct zmk_behavior_binding *binding,
-                              struct zmk_behavior_binding_event event) {
-    bool caps_active, shift_held;
-    read_input_state(&caps_active, &shift_held);
-    bool need_shift = (!caps_active) ^ shift_held;
-    return send_key(binding->param1, false, need_shift, shift_held,
-                    event.timestamp);
+static int on_force_upper_binding_released(struct zmk_behavior_binding *binding,
+                                           struct zmk_behavior_binding_event event) {
+    zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
+    bool need_shift = !caps_active;
+    return send_key(binding->param1, false, need_shift, event.timestamp);
 }
 
 static const struct behavior_driver_api force_upper_driver_api = {
-    .binding_pressed  = on_fucase_pressed,
-    .binding_released = on_fucase_released,
+    .binding_pressed  = on_force_upper_binding_pressed,
+    .binding_released = on_force_upper_binding_released,
 };
 
 BEHAVIOR_DT_INST_DEFINE(0, NULL, NULL, NULL, NULL,
@@ -147,39 +85,41 @@ BEHAVIOR_DT_INST_DEFINE(0, NULL, NULL, NULL, NULL,
 #endif /* DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) */
 
 /* -----------------------------------------------------------------------
- * FORCE-LOWER  (flcase)
+ * FORCE-LOWER
+ * Goal: always send the lowercase form of the letter.
  *
- * Default: always produce lowercase.
- * With shift held: invert → always produce uppercase.
+ * CapsLock OFF → host sends lowercase bare   → shift_needed = false
+ * CapsLock ON  → host would capitalise, so
+ *                we need Shift to cancel it  → shift_needed = true
  *
- *   need_shift = caps_active XOR shift_held
+ * The Shift+letter combination in the presence of CapsLock produces the
+ * lowercase letter on all major operating systems (Windows, macOS, Linux).
  * ----------------------------------------------------------------------- */
 #undef DT_DRV_COMPAT
 #define DT_DRV_COMPAT zmk_behavior_force_lower
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
-static int on_flcase_pressed(struct zmk_behavior_binding *binding,
-                             struct zmk_behavior_binding_event event) {
-    bool caps_active, shift_held;
-    read_input_state(&caps_active, &shift_held);
-    bool need_shift = caps_active ^ shift_held;
-    return send_key(binding->param1, true, need_shift, shift_held,
-                    event.timestamp);
+static int on_force_lower_binding_pressed(struct zmk_behavior_binding *binding,
+                                          struct zmk_behavior_binding_event event) {
+    zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
+    /* Lowercase = bare key when caps OFF, shifted key when caps ON */
+    bool need_shift = caps_active;
+    return send_key(binding->param1, true, need_shift, event.timestamp);
 }
 
-static int on_flcase_released(struct zmk_behavior_binding *binding,
-                              struct zmk_behavior_binding_event event) {
-    bool caps_active, shift_held;
-    read_input_state(&caps_active, &shift_held);
-    bool need_shift = caps_active ^ shift_held;
-    return send_key(binding->param1, false, need_shift, shift_held,
-                    event.timestamp);
+static int on_force_lower_binding_released(struct zmk_behavior_binding *binding,
+                                           struct zmk_behavior_binding_event event) {
+    zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
+    bool need_shift = caps_active;
+    return send_key(binding->param1, false, need_shift, event.timestamp);
 }
 
 static const struct behavior_driver_api force_lower_driver_api = {
-    .binding_pressed  = on_flcase_pressed,
-    .binding_released = on_flcase_released,
+    .binding_pressed  = on_force_lower_binding_pressed,
+    .binding_released = on_force_lower_binding_released,
 };
 
 BEHAVIOR_DT_INST_DEFINE(0, NULL, NULL, NULL, NULL,
