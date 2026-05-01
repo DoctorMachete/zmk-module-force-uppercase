@@ -25,40 +25,35 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* -----------------------------------------------------------------------
  * Shared helper.
  *
- * want_upper: true  → we want to produce an uppercase letter
- *             false → we want to produce a lowercase letter
+ * want_upper: true  → produce uppercase
+ *             false → produce lowercase
  *
- * Strategy — never raise fake LSHIFT press/release events onto the bus.
- * That would interfere with other behaviors (hold-tap, combos, etc.) that
- * are listening to keycode_state_changed.  Instead we use the same two
- * mechanisms that behavior_mod_morph.c uses:
+ * We never raise fake LSHIFT press/release events onto the bus — that
+ * would interfere with hold-tap, combos, and sticky-key behaviors that
+ * listen to keycode_state_changed.
  *
- *   • zmk_hid_masked_modifiers_set()  — suppress explicit shift from the
- *     HID report for the duration of the keycode event, without generating
- *     any modifier events on the bus.
- *   • implicit_modifiers on the keycode event — inject shift into the HID
- *     report for just this keycode, again without modifier bus events.
+ * Instead we use only two HID-layer mechanisms that don't touch the bus:
  *
- * This guarantees that the externally visible shift state is identical
- * before and after the behavior fires.
+ *   • zmk_hid_masked_modifiers_set()      — hides an already-held shift
+ *     from the HID report for the duration of the keycode event.
+ *
+ *   • zmk_hid_implicit_modifiers_press()  — injects a shift into the HID
+ *     report for the duration of the keycode event without generating any
+ *     modifier event on the bus.  Released immediately after via
+ *     zmk_hid_implicit_modifiers_release().
+ *
+ * Both techniques are used by ZMK's own behavior_mod_morph.c and
+ * hid_listener.c respectively, so they are safe in this ZMK version.
  * ----------------------------------------------------------------------- */
 static int send_key(uint32_t keycode, bool pressed, bool want_upper,
                     int64_t timestamp) {
     zmk_hid_indicators_t ind = zmk_hid_indicators_get_current_profile();
-    bool caps_active  = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
-    bool shift_held   = (zmk_hid_get_explicit_mods() & ZMK_SHIFT_MODS) != 0;
+    bool caps_active = (ind & ZMK_LED_CAPSLOCK_BIT) != 0;
+    bool shift_held  = (zmk_hid_get_explicit_mods() & ZMK_SHIFT_MODS) != 0;
 
     /*
-     * Determine what the host would naturally produce given the current
-     * caps + shift state, then decide what corrections to apply.
-     *
-     * Natural output matrix:
-     *   caps OFF, shift OFF → lowercase
-     *   caps OFF, shift ON  → uppercase
-     *   caps ON,  shift OFF → uppercase
-     *   caps ON,  shift ON  → lowercase
-     *
-     * natural_upper = caps_active XOR shift_held
+     * What the host would naturally produce:
+     *   caps XOR shift → uppercase,  otherwise → lowercase
      */
     bool natural_upper = caps_active ^ shift_held;
 
@@ -66,35 +61,27 @@ static int send_key(uint32_t keycode, bool pressed, bool want_upper,
     bool inject_shift = false;
 
     if (want_upper && !natural_upper) {
-        /* Need uppercase but host would send lowercase → inject shift */
-        inject_shift = true;
+        inject_shift = true;   /* need uppercase, host would give lowercase */
     } else if (!want_upper && natural_upper) {
-        /* Need lowercase but host would send uppercase → mask shift */
-        mask_shift = true;
+        mask_shift = true;     /* need lowercase, host would give uppercase */
     }
-    /* Otherwise natural output already matches — send bare keycode */
+    /* natural already matches → send bare, no correction needed */
 
     int ret;
 
     if (mask_shift) {
         zmk_hid_masked_modifiers_set(ZMK_SHIFT_MODS);
     }
-
-    struct zmk_keycode_state_changed *ev =
-        new_zmk_keycode_state_changed_from_encoded(keycode, pressed, timestamp);
-    if (ev == NULL) {
-        if (mask_shift) {
-            zmk_hid_masked_modifiers_clear();
-        }
-        return -ENOMEM;
-    }
-
     if (inject_shift) {
-        ev->implicit_modifiers |= MOD_LSFT;
+        zmk_hid_implicit_modifiers_press(MOD_LSFT);
     }
 
-    ret = raise_zmk_keycode_state_changed(ev);
+    ret = raise_zmk_keycode_state_changed_from_encoded(keycode, pressed, timestamp);
 
+    /* Always restore HID state, regardless of ret */
+    if (inject_shift) {
+        zmk_hid_implicit_modifiers_release();
+    }
     if (mask_shift) {
         zmk_hid_masked_modifiers_clear();
     }
