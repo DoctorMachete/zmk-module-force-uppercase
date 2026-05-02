@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 The ZMK Contributors
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: MIT 
  */
 
 #define DT_DRV_COMPAT zmk_behavior_force_upper  /* redefined per-driver below */
