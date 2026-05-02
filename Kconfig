@@ -9,15 +9,3 @@ config ZMK_BEHAVIOR_FORCE_LOWER
     default y
     depends on DT_HAS_ZMK_BEHAVIOR_FORCE_LOWER_ENABLED
     depends on ZMK_HID_INDICATORS
-
-config ZMK_BEHAVIOR_FORCE_TRUE_UPPER
-    bool
-    default y
-    depends on DT_HAS_ZMK_BEHAVIOR_FORCE_TRUE_UPPER_ENABLED
-    depends on ZMK_HID_INDICATORS
-
-config ZMK_BEHAVIOR_FORCE_TRUE_LOWER
-    bool
-    default y
-    depends on DT_HAS_ZMK_BEHAVIOR_FORCE_TRUE_LOWER_ENABLED
-    depends on ZMK_HID_INDICATORS

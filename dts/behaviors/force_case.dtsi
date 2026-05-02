@@ -15,16 +15,5 @@
             compatible = "zmk,behavior-force-lower";
             #binding-cells = <1>;
         };
-
-        /omit-if-no-ref/ ftucase: force_true_upper {
-            compatible = "zmk,behavior-force-true-upper";
-            #binding-cells = <1>;
-        };
-
-        /omit-if-no-ref/ ftlcase: force_true_lower {
-            compatible = "zmk,behavior-force-true-lower";
-            #binding-cells = <1>;
-        };
-
     };
 };
